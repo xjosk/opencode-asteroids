@@ -31,7 +31,7 @@ const randInt = (min, max) => Math.floor(rand(min, max + 1));
 
 // ── Bullet ────────────────────────────────────────────────────────────────────
 class Bullet {
-  constructor(x, y, angle) {
+  constructor(x, y, angle, color = '#fff') {
     this.x = x;
     this.y = y;
     const SPEED = 520;
@@ -39,6 +39,7 @@ class Bullet {
     this.vy = Math.sin(angle) * SPEED;
     this.ttl  = 1.1;
     this.radius = 2;
+    this.color = color;
     this.dead = false;
   }
 
@@ -50,7 +51,7 @@ class Bullet {
   }
 
   draw() {
-    ctx.fillStyle = '#fff';
+    ctx.fillStyle = this.color;
     ctx.beginPath();
     ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
     ctx.fill();
@@ -133,6 +134,7 @@ class Ship {
     this.invincible    = 3;
     this.shootCooldown = 0;
     this.speedBoost    = 0;
+    this.tripleShot    = 0;
     this.dead          = false;
   }
 
@@ -141,6 +143,7 @@ class Ship {
     if (this.invincible    > 0) this.invincible    -= dt;
     if (this.shootCooldown > 0) this.shootCooldown -= dt;
     if (this.speedBoost    > 0) this.speedBoost    -= dt;
+    if (this.tripleShot    > 0) this.tripleShot    -= dt;
 
     const ROT   = 3.5;   // rad/s
     const THRUST = 260;  // px/s²
@@ -169,6 +172,16 @@ class Ship {
     const NOSE = 21;
     const ox = this.x + Math.cos(this.angle) * NOSE;
     const oy = this.y + Math.sin(this.angle) * NOSE;
+
+    // Con el power-up de triple disparo: abanico de 3 balas
+    if (this.tripleShot > 0) {
+      const SPREAD = 0.13;  // rad (~7.5°) entre balas del abanico
+      return [
+        new Bullet(ox, oy, this.angle - SPREAD, '#7cffb2'),
+        new Bullet(ox, oy, this.angle,          '#7cffb2'),
+        new Bullet(ox, oy, this.angle + SPREAD, '#7cffb2'),
+      ];
+    }
     return [new Bullet(ox, oy, this.angle)];
   }
 
@@ -241,16 +254,18 @@ class Particle {
   }
 }
 
-// ── Power-up de velocidad ──────────────────────────────────────────────────────
-const POWERUP_DROP = 0.12;  // probabilidad de soltar al destruir un asteroide
-const POWERUP_TTL  = 9;     // segundos que el ítem flota antes de desaparecer
-const POWERUP_TIME = 5;     // duración del efecto
-const POWERUP_MULT = 2;     // multiplicador de empuje
+// ── Power-ups (velocidad y triple disparo) ────────────────────────────────────
+const POWERUP_DROP = 0.12;          // probabilidad de soltar al destruir un asteroide
+const POWERUP_TTL  = 9;             // segundos que el ítem flota antes de desaparecer
+const POWERUP_TIME = 5;             // duración de ambos efectos
+const POWERUP_MULT = 2;             // multiplicador de empuje
+const POWERUP_TRIPLE_CHANCE = 0.5;  // si cae un ítem, probabilidad de que sea de triple
 
 class Powerup {
-  constructor(x, y) {
+  constructor(x, y, type = 'velocidad') {
     this.x = x;
     this.y = y;
+    this.type = type;
     this.radius = 12;
     this.ttl  = POWERUP_TTL;
     this.rot  = rand(0, Math.PI * 2);
@@ -279,7 +294,7 @@ class Powerup {
     ctx.save();
     ctx.translate(this.x, this.y);
     ctx.rotate(this.rot);
-    ctx.strokeStyle = '#ffd24a';
+    ctx.strokeStyle = this.type === 'triple' ? '#7cffb2' : '#ffd24a';
     ctx.lineWidth   = 1.5;
     ctx.lineJoin    = 'round';
 
@@ -292,12 +307,22 @@ class Powerup {
     ctx.closePath();
     ctx.stroke();
 
-    // Chevrón de velocidad
-    ctx.beginPath();
-    ctx.moveTo(-4, -4);
-    ctx.lineTo(1, 0);
-    ctx.lineTo(-4, 4);
-    ctx.stroke();
+    if (this.type === 'triple') {
+      // Tres rayitas verticales: las 3 balas del disparo triple
+      for (const dx of [-4, 0, 4]) {
+        ctx.beginPath();
+        ctx.moveTo(dx, -3);
+        ctx.lineTo(dx, 3);
+        ctx.stroke();
+      }
+    } else {
+      // Chevrón de velocidad
+      ctx.beginPath();
+      ctx.moveTo(-4, -4);
+      ctx.lineTo(1, 0);
+      ctx.lineTo(-4, 4);
+      ctx.stroke();
+    }
 
     ctx.restore();
   }
@@ -423,7 +448,8 @@ function explode(x, y, count = 8) {
 function killShip() {
   explode(ship.x, ship.y, 14);
   ship.dead = true;
-  ship.speedBoost = 0;   // el power-up se pierde al morir
+  ship.speedBoost = 0;   // los power-ups se pierden al morir
+  ship.tripleShot = 0;
   lives--;
   if (lives <= 0) {
     state = 'gameover';
@@ -489,8 +515,11 @@ function update(dt) {
         score += POINTS[a.size];
         explode(a.x, a.y, a.size * 5);
         newAsteroids.push(...a.split());
-        // Posible power-up de velocidad al destruir un asteroide
-        if (Math.random() < POWERUP_DROP) powerups.push(new Powerup(a.x, a.y));
+        // Posible power-up al destruir un asteroide (velocidad o triple disparo)
+        if (Math.random() < POWERUP_DROP) {
+          const type = Math.random() < POWERUP_TRIPLE_CHANCE ? 'triple' : 'velocidad';
+          powerups.push(new Powerup(a.x, a.y, type));
+        }
       }
     }
   }
@@ -515,7 +544,8 @@ function update(dt) {
   for (const p of powerups) {
     if (dist(ship, p) < ship.radius + p.radius) {
       p.dead = true;
-      ship.speedBoost = POWERUP_TIME;
+      if (p.type === 'triple') ship.tripleShot = POWERUP_TIME;
+      else                     ship.speedBoost = POWERUP_TIME;
       explode(p.x, p.y, 10);
     }
   }
@@ -566,11 +596,18 @@ function drawHUD() {
   for (let i = 0; i < lives; i++)
     drawLifeIcon(W - 16 - i * 22, 18);
 
-  // Indicador del power-up de velocidad activo
+  // Indicadores de power-ups activos (se apilan si hay más de uno)
+  let hudY = 48;
   if (ship.speedBoost > 0) {
     ctx.fillStyle = '#ffd24a';
     ctx.font = 'bold 15px monospace';
-    ctx.fillText(`VELOCIDAD ×2  ${ship.speedBoost.toFixed(1)}s`, W / 2, 48);
+    ctx.fillText(`VELOCIDAD ×2  ${ship.speedBoost.toFixed(1)}s`, W / 2, hudY);
+    hudY += 18;
+  }
+  if (ship.tripleShot > 0) {
+    ctx.fillStyle = '#7cffb2';
+    ctx.font = 'bold 15px monospace';
+    ctx.fillText(`TRIPLE  ${ship.tripleShot.toFixed(1)}s`, W / 2, hudY);
   }
 }
 
