@@ -122,8 +122,11 @@ class Asteroid {
 // ── Skins de la nave ──────────────────────────────────────────────────────────
 // Cada skin define nombre, color del casco, color de la llama, el punto de
 // salida de la llama (llamaX) y la silueta (verts, con la nariz hacia +x).
-// "detalles" son líneas extra opcionales (cabina, etc.). Todo es cosmético:
-// el radio de colisión de la nave no cambia.
+// "detalles" son líneas extra opcionales (cabina, etc.).
+// Propiedades opcionales (si faltan valen 1 y la skin es solo cosmética):
+//   escala: multiplica el tamaño del dibujo, el radio de colisión (12 base)
+//           y el radio del escudo.
+//   mult:   multiplica todos los puntos obtenidos con esa nave.
 const SKINS = [
   {
     nombre: 'Clásica', color: '#fff', llama: 'rgba(255, 130, 0, 0.85)', llamaX: -8,
@@ -146,6 +149,14 @@ const SKINS = [
     nombre: 'Espectro', color: '#d46bff', llama: 'rgba(190, 90, 255, 0.9)', llamaX: -14,
     verts: [[24, 0], [-6, -4], [-14, 0], [-6, 4]],
   },
+  // Mega Ship (issue #2): doble de tamaño y de hitbox, a cambio de doble puntuación
+  {
+    nombre: 'Mega Ship', color: '#9d4edd', llama: 'rgba(255, 90, 220, 0.9)', llamaX: -11,
+    verts: [[21, 0], [8, -11], [-15, -11], [-10, 0], [-15, 11], [8, 11]],
+    detalles: [[[5, -5], [11, 0], [5, 5]]],
+    escala: 2,
+    mult: 2,
+  },
 ];
 
 const SKIN_KEY = 'asteroids-skin';
@@ -165,16 +176,25 @@ function guardarSkin() {
 
 let skinIndex = cargarSkin();
 
-// Dibuja la nave del skin dado. La llama es opcional y puede recibir un color
-// que reemplaza el del skin (usado por el power-up de velocidad).
+// Escala de la skin activa (1 = normal). Afecta al dibujo, al radio de
+// colisión (12 base) y al radio del escudo.
+const escalaNave = () => SKINS[skinIndex].escala || 1;
+// Multiplicador de puntos de la skin activa (1 = normal)
+const multPuntos = () => SKINS[skinIndex].mult || 1;
+
+// Dibuja la nave del skin dado, aplicando su escala. La llama es opcional y
+// puede recibir un color que reemplaza el del skin (usado por el power-up de
+// velocidad).
 function drawNave(skin, x, y, angle, scale = 1, llama = false, llamaColor = null) {
+  // La escala de la skin se combina con la escala del contexto de dibujo
+  const s = scale * (skin.escala || 1);
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(angle);
-  ctx.scale(scale, scale);
+  ctx.scale(s, s);
   ctx.strokeStyle = skin.color;
   // El grosor se compensa por la escala para que se vea igual en todos lados
-  ctx.lineWidth = 1.5 / scale;
+  ctx.lineWidth = 1.5 / s;
   ctx.lineJoin  = 'round';
 
   // Casco
@@ -187,7 +207,7 @@ function drawNave(skin, x, y, angle, scale = 1, llama = false, llamaColor = null
 
   // Detalles extra (cabina, etc.)
   if (skin.detalles) {
-    ctx.lineWidth = 1 / scale;
+    ctx.lineWidth = 1 / s;
     for (const linea of skin.detalles) {
       ctx.beginPath();
       ctx.moveTo(linea[0][0], linea[0][1]);
@@ -204,7 +224,7 @@ function drawNave(skin, x, y, angle, scale = 1, llama = false, llamaColor = null
     ctx.lineTo(skin.llamaX - rand(6, 14), 0);
     ctx.lineTo(skin.llamaX, 4);
     ctx.strokeStyle = llamaColor || skin.llama;
-    ctx.lineWidth   = 1.5 / scale;
+    ctx.lineWidth   = 1.5 / s;
     ctx.stroke();
   }
 
@@ -227,7 +247,7 @@ class Ship {
     this.angle  = -Math.PI / 2;
     this.vx     = 0;
     this.vy     = 0;
-    this.radius = 12;
+    this.radius = 12 * escalaNave();
     this.thrusting     = false;
     this.invincible    = 3;
     this.shootCooldown = 0;
@@ -240,6 +260,8 @@ class Ship {
 
   update(dt) {
     if (this.dead) return;
+    // La skin puede cambiar en pleno juego: refresca el radio del hitbox
+    this.radius = 12 * escalaNave();
     if (this.invincible    > 0) this.invincible    -= dt;
     if (this.shootCooldown > 0) this.shootCooldown -= dt;
     if (this.speedBoost    > 0) this.speedBoost    -= dt;
@@ -279,7 +301,8 @@ class Ship {
   tryShoot() {
     if (this.shootCooldown > 0 || this.dead) return [];
     this.shootCooldown = 0.2;
-    const NOSE = 21;
+    // La nariz se aleja con la escala de la skin (Mega Ship dispara desde ×2)
+    const NOSE = 21 * escalaNave();
     const ox = this.x + Math.cos(this.angle) * NOSE;
     const oy = this.y + Math.sin(this.angle) * NOSE;
 
@@ -308,7 +331,7 @@ class Ship {
         ctx.fillStyle   = 'rgba(74, 224, 255, 0.10)';
         ctx.lineWidth   = 1.5;
         ctx.beginPath();
-        ctx.arc(0, 0, ESCUDO_RADIUS, 0, Math.PI * 2);
+        ctx.arc(0, 0, ESCUDO_RADIUS * escalaNave(), 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
         ctx.restore();
@@ -696,7 +719,7 @@ function update(dt) {
       if (!a.dead && !b.dead && dist(b, a) < a.radius) {
         b.dead = true;
         a.dead = true;
-        score += POINTS[a.size];
+        score += POINTS[a.size] * multPuntos();
         explode(a.x, a.y, a.size * 5);
         newAsteroids.push(...a.split());
         // Posible power-up al destruir un asteroide
@@ -713,7 +736,7 @@ function update(dt) {
       if (!s.dead && !b.dead && dist(b, s) < s.radius) {
         b.dead = true;
         s.dead = true;
-        score += ESTRELLA_POINTS;
+        score += ESTRELLA_POINTS * multPuntos();
         explode(s.x, s.y, 14);
       }
     }
@@ -742,9 +765,9 @@ function update(dt) {
     // El escudo destruye lo que toca la burbuja (como si lo dispararas)
     const restos = [];
     for (const a of asteroids) {
-      if (!a.dead && dist(ship, a) < ESCUDO_RADIUS + a.radius) {
+      if (!a.dead && dist(ship, a) < ESCUDO_RADIUS * escalaNave() + a.radius) {
         a.dead = true;
-        score += POINTS[a.size];
+        score += POINTS[a.size] * multPuntos();
         explode(a.x, a.y, a.size * 5);
         restos.push(...a.split());
         maybeDrop(a.x, a.y);
@@ -753,9 +776,9 @@ function update(dt) {
     asteroids = asteroids.filter(a => !a.dead).concat(restos);
 
     for (const s of specials) {
-      if (!s.dead && dist(ship, s) < ESCUDO_RADIUS + s.radius) {
+      if (!s.dead && dist(ship, s) < ESCUDO_RADIUS * escalaNave() + s.radius) {
         s.dead = true;
-        score += ESTRELLA_POINTS;
+        score += ESTRELLA_POINTS * multPuntos();
         explode(s.x, s.y, 14);
       }
     }
@@ -775,8 +798,9 @@ function update(dt) {
 
 // ── Draw ──────────────────────────────────────────────────────────────────────
 function drawLifeIcon(x, y) {
-  // Mini-nave con el skin actual, mirando hacia arriba
-  drawNave(SKINS[skinIndex], x, y, -Math.PI / 2, 0.45, false);
+  // Mini-nave con el skin actual, mirando hacia arriba. Se divide por la
+  // escala para que todas las skins ocupen lo mismo en el HUD.
+  drawNave(SKINS[skinIndex], x, y, -Math.PI / 2, 0.45 / escalaNave(), false);
 }
 
 function drawHUD() {
@@ -794,6 +818,15 @@ function drawHUD() {
 
   // Indicadores de power-ups activos (se apilan si hay más de uno)
   let hudY = 48;
+
+  // Multiplicador de puntos de la skin activa (Mega Ship)
+  if (multPuntos() > 1) {
+    ctx.fillStyle = SKINS[skinIndex].color;
+    ctx.font = 'bold 15px monospace';
+    ctx.fillText(`PUNTOS ×${multPuntos()}`, W / 2, hudY);
+    hudY += 18;
+  }
+
   if (ship.speedBoost > 0) {
     ctx.fillStyle = '#ffd24a';
     ctx.font = 'bold 15px monospace';
