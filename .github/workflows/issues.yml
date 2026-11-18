@@ -1,0 +1,318 @@
+# Formatea y etiqueta automáticamente los issues al crearse:
+# clasifica por palabras clave (reglas, sin IA), reescribe el cuerpo con
+# secciones —conservando el texto original byte a byte— y asigna las
+# etiquetas estándar de GitHub (bug, enhancement, question, documentation).
+name: Formatear issues nuevos
+
+on:
+  issues:
+    types: [opened]
+
+# Permisos mínimos: solo escritura sobre issues.
+permissions:
+  issues: write
+
+# Nunca dos ejecuciones simultáneas sobre el mismo issue.
+concurrency:
+  group: formato-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  formatear:
+    name: Clasificar, formatear y etiquetar
+    runs-on: ubuntu-latest
+    # Se ignoran los issues creados por bots.
+    if: github.event.issue.user.type != 'Bot'
+    steps:
+      - name: Procesar el issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Formatea y etiqueta el issue recién creado:
+            // 1) Clasifica por palabras clave (título ×2, cuerpo ×1, umbral ≥ UMBRAL).
+            // 2) Extrae puntos clave: pasos, errores, código, archivos y enlaces.
+            // 3) Reescribe el cuerpo conservando el texto original intacto y
+            //    añade las etiquetas detectadas (sin quitar las existentes).
+            const MARCADOR = '<!-- auto-issue-formatter -->';
+            const UMBRAL = 2;
+
+            const issue = context.payload.issue;
+            const titulo = (issue.title || '').trim();
+            const cuerpoOriginal = issue.body == null ? '' : String(issue.body);
+
+            // Idempotencia: si ya fue formateado, no se vuelve a tocar.
+            if (cuerpoOriginal.includes(MARCADOR)) {
+              core.info('El issue ya contiene el marcador de formateo; no se hace nada.');
+              return;
+            }
+
+            // --- Tablas de clasificación (título ×2, cuerpo ×1, umbral ≥ UMBRAL) ---
+            const REGLAS = {
+              bug: {
+                emoji: '💥',
+                nombre: 'fallo',
+                claves: [
+                  'bug', 'error', 'fallo', 'falla', 'fallar', 'falló', 'crash', 'crashea',
+                  'crasheo', 'se rompe', 'se rompió', 'roto', 'no funciona',
+                  'deja de funcionar', 'funciona mal', 'excepción', 'exception',
+                  'traceback', 'se congela', 'congelado', 'pantalla negra', 'nan',
+                  'undefined', 'typeerror', 'referenceerror',
+                ],
+              },
+              enhancement: {
+                emoji: '✨',
+                nombre: 'mejora',
+                claves: [
+                  'mejora', 'mejorar', 'añade', 'añadir', 'agrega', 'agregar', 'sugiere',
+                  'sugerencia', 'propuesta', 'idea', 'feature', 'funcionalidad',
+                  'sería bueno', 'sería genial', 'debería', 'deberían', 'me gustaría',
+                  'nueva funcionalidad', 'permitir',
+                ],
+              },
+              question: {
+                emoji: '❓',
+                nombre: 'pregunta',
+                claves: [
+                  'cómo', 'como hago', 'como puedo', 'como se hace', 'duda', 'pregunta',
+                  'ayuda', 'es posible', 'se puede', 'hay alguna', 'alguna forma',
+                  'alguna manera', 'puedo',
+                ],
+              },
+              documentation: {
+                emoji: '📚',
+                nombre: 'documentación',
+                claves: [
+                  'documentación', 'documentacion', 'docs', 'readme', 'wiki', 'guía',
+                  'guia', 'tutorial', 'comentario', 'comentarios', 'explicación',
+                  'explicacion', 'manual', 'agents.md',
+                ],
+              },
+            };
+
+            // --- Utilidades ---
+            function escaparRegExp(s) {
+              return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            }
+
+            // Cuenta apariciones de una palabra/frase con límites de palabra
+            // reales (respeta acentos: «función» no matchea «funciona»).
+            function apariciones(texto, clave) {
+              try {
+                const re = new RegExp(
+                  '(?<![\\p{L}\\p{N}])' + escaparRegExp(clave) + '(?![\\p{L}\\p{N}])',
+                  'giu'
+                );
+                return (texto.match(re) || []).length;
+              } catch (e) {
+                return texto.toLowerCase().includes(clave.toLowerCase()) ? 1 : 0;
+              }
+            }
+
+            function truncar(s, n) {
+              s = String(s).trim();
+              return s.length > n ? s.slice(0, n - 3) + '...' : s;
+            }
+
+            // --- Bloques de código y mensajes de error ---
+            const bloques = [...cuerpoOriginal.matchAll(/```([^\n`]*)\n([\s\S]*?)```/g)].map(m => ({
+              lenguaje: (m[1] || '').trim().split(/\s+/)[0] || 'sin lenguaje',
+              contenido: m[2] || '',
+            }));
+
+            const RE_ERROR = /error|exception|traceback|typeerror|referenceerror|cannot read|is not a function|is not defined|nan\b/i;
+            const lineasError = [];
+            for (const b of bloques) {
+              for (const linea of b.contenido.split('\n')) {
+                const l = linea.trim();
+                if (l && RE_ERROR.test(l)) lineasError.push(truncar(l, 120));
+              }
+            }
+            const errores = lineasError.slice(0, 5);
+
+            // --- Puntuación de etiquetas ---
+            const puntosPor = {};
+            const motivosPor = {};
+            for (const [etiqueta, regla] of Object.entries(REGLAS)) {
+              let puntos = 0;
+              const motivos = [];
+              for (const clave of regla.claves) {
+                const enTitulo = apariciones(titulo, clave);
+                const enCuerpo = apariciones(cuerpoOriginal, clave);
+                if (!enTitulo && !enCuerpo) continue;
+                puntos += enTitulo * 2 + enCuerpo;
+                if (motivos.length < 3) {
+                  motivos.push(enTitulo ? '«' + clave + '» en el título' : '«' + clave + '» en el cuerpo');
+                }
+              }
+              // Señales extra.
+              if (etiqueta === 'bug' && errores.length) {
+                puntos += 2;
+                if (motivos.length < 3) motivos.push('traza de error en el código');
+              }
+              if (etiqueta === 'question' && titulo.endsWith('?')) {
+                puntos += 2;
+                if (motivos.length < 3) motivos.push('el título termina en «?»');
+              }
+              puntosPor[etiqueta] = puntos;
+              motivosPor[etiqueta] = motivos;
+            }
+
+            const detectadas = Object.entries(puntosPor)
+              .filter(([, p]) => p >= UMBRAL)
+              .sort((a, b) => b[1] - a[1])
+              .map(([e]) => e);
+
+            // --- Puntos clave (extracción heurística) ---
+            const puntosClave = [];
+            const lineas = cuerpoOriginal.split('\n');
+            const esItem = l => /^\s{0,8}(?:\d+[.)]|[-*+])\s+\S/.test(l);
+
+            // 1) Pasos de reproducción: primera lista de ≥2 ítems que esté
+            //    numerada o que siga a una línea que mencione pasos/reproducción.
+            let pasos = null;
+            {
+              let actual = null;
+              let prev = '';
+              const runs = [];
+              for (const l of lineas) {
+                if (esItem(l)) {
+                  if (!actual) actual = { items: [], prev };
+                  actual.items.push(l);
+                } else {
+                  if (actual) { runs.push(actual); actual = null; }
+                  prev = l;
+                }
+              }
+              if (actual) runs.push(actual);
+              for (const r of runs) {
+                if (r.items.length < 2) continue;
+                const numerada = r.items.every(it => /^\s*\d/.test(it));
+                const prevMenciona = /paso|reproduc|c[oó]mo|probar|ocurre/i.test(r.prev || '');
+                if (numerada || prevMenciona) { pasos = r; break; }
+              }
+            }
+            if (pasos) {
+              const items = pasos.items
+                .slice(0, 8)
+                .map(it => truncar(it.replace(/^\s*(?:\d+[.)]|[-*+])\s+/, ''), 100));
+              puntosClave.push('**Pasos de reproducción** detectados (' + items.length + '):');
+              for (const it of items) puntosClave.push('  - ' + it);
+            }
+
+            // 2) Mensajes de error dentro del código.
+            if (errores.length) {
+              puntosClave.push('**Mensajes de error** encontrados en el código (' + errores.length + '):');
+              for (const e of errores) puntosClave.push('  - `' + e.replace(/`/g, "'") + '`');
+            }
+
+            // 3) Bloques de código presentes.
+            if (bloques.length) {
+              const lenguajes = [...new Set(bloques.map(b => b.lenguaje))].join(', ');
+              puntosClave.push(
+                'Incluye ' + bloques.length + ' bloque(s) de código' +
+                (lenguajes && lenguajes !== 'sin lenguaje' ? ' (' + lenguajes + ')' : '') + '.'
+              );
+            }
+
+            // 4) Archivos del repositorio mencionados.
+            {
+              const texto = titulo + '\n' + cuerpoOriginal;
+              const vistos = new Set();
+              const archivos = [];
+              const reArchivo = /(?<![\p{L}\p{N}\/.])[\w.-]+\.(?:js|html|css|md|json|svg)(?![\p{L}\p{N}])/giu;
+              for (const a of texto.match(reArchivo) || []) {
+                const k = a.toLowerCase();
+                if (!vistos.has(k)) { vistos.add(k); archivos.push(a); }
+              }
+              if (archivos.length) {
+                puntosClave.push('**Archivos mencionados:** ' + archivos.slice(0, 6).map(a => '`' + a + '`').join(', ') + '.');
+              }
+            }
+
+            // 5) Enlaces incluidos.
+            {
+              const texto = titulo + '\n' + cuerpoOriginal;
+              const enlaces = [];
+              const vistos = new Set();
+              for (const u of texto.match(/https?:\/\/[^\s<>)\]]+/g) || []) {
+                const limpio = u.replace(/[.,;:!?]+$/, '');
+                if (!vistos.has(limpio)) { vistos.add(limpio); enlaces.push(limpio); }
+              }
+              if (enlaces.length) {
+                puntosClave.push('**Enlaces incluidos:** ' + enlaces.slice(0, 5).join(', ') + '.');
+              }
+            }
+
+            // 6) Si no hubo nada destacable.
+            if (!puntosClave.length) {
+              puntosClave.push(
+                cuerpoOriginal.trim()
+                  ? 'Sin detalles técnicos destacables; el issue es breve (' +
+                    cuerpoOriginal.trim().length + ' caracteres).'
+                  : 'El issue se creó sin descripción; conviene pedir más detalles al autor.'
+              );
+            }
+
+            // --- Resumen ---
+            let resumen;
+            if (detectadas.length) {
+              const top = detectadas[0];
+              const r = REGLAS[top];
+              const senales = motivosPor[top].slice(0, 2).join(' y ');
+              resumen = 'Este issue parece ' + r.emoji + ' **' + r.nombre + '** (etiqueta `' +
+                top + '`)' + (senales ? ' — señales: ' + senales : '') + '.';
+            } else {
+              resumen = 'No se detectaron señales claras de clasificación; ninguna etiqueta ' +
+                'alcanzó el umbral de ' + UMBRAL + ' puntos.';
+            }
+
+            // --- Tabla de clasificación ---
+            let clasificacion;
+            if (detectadas.length) {
+              const filas = ['| Etiqueta | Motivo |', '| --- | --- |'];
+              for (const etiqueta of detectadas) {
+                const motivo = motivosPor[etiqueta].join('; ');
+                filas.push('| `' + etiqueta + '` | ' + (motivo || 'señales combinadas en el texto') + ' |');
+              }
+              clasificacion = filas.join('\n');
+            } else {
+              clasificacion = '_Ninguna etiqueta superó el umbral de confianza (≥ ' + UMBRAL + ' puntos)._';
+            }
+
+            // --- Nuevo cuerpo (el original queda intacto, byte a byte) ---
+            const descripcionOriginal = cuerpoOriginal.trim()
+              ? cuerpoOriginal
+              : '_El issue no incluía descripción al crearse._';
+
+            const nuevoCuerpo = [
+              MARCADOR,
+              '## 📝 Descripción original',
+              '',
+              descripcionOriginal,
+              '',
+              '## 🎯 Resumen',
+              '',
+              resumen,
+              '',
+              '## 🔍 Puntos clave',
+              '',
+              ...puntosClave,
+              '',
+              '## 🏷️ Clasificación',
+              '',
+              clasificacion,
+            ].join('\n');
+
+            // --- Fusionar etiquetas (nunca se quitan las que ya tenía el issue) ---
+            const etiquetasAutor = (issue.labels || []).map(l => l.name);
+            const etiquetasFinales = [...new Set([...etiquetasAutor, ...detectadas])];
+
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: nuevoCuerpo,
+              labels: etiquetasFinales,
+            });
+
+            core.info('Issue #' + issue.number + ' formateado. Etiquetas finales: ' + etiquetasFinales.join(', '));
